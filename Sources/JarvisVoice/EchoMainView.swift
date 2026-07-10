@@ -87,7 +87,7 @@ struct HomeView: View {
                     statCard(value: String(format: "%.0f", wpm), label: "wpm")
                     statCard(value: "\(streak)", label: "day streak")
                     statCard(value: String(format: "$%.2f", monthCost.whisperUSD), label: "this month")
-                        .help("Transcription API spend this month. Claude styling runs on your Claude Code CLI subscription - not billed per token (est. $\(String(format: "%.3f", monthCost.llmUSD))).")
+                        .help("Transcription API spend this month. Style post-processing runs on the fast chat API (Groq/OpenAI) - negligible, est. $\(String(format: "%.3f", monthCost.llmUSD)).")
                 }
 
                 Text("RECENT")
@@ -467,10 +467,10 @@ struct InsightsView: View {
             HStack(spacing: 18) {
                 costBadge("Transcription", value: costRange.whisperUSD,
                           note: String(format: "%.1f min audio", costRange.audioSeconds / 60))
-                costBadge("Claude (est.)", value: costRange.llmUSD,
-                          note: "unbilled - CLI subscription")
+                costBadge("Styling (est.)", value: costRange.llmUSD,
+                          note: "chat API - negligible")
             }
-            Text("Headline spend is transcription only. Claude styling runs on your Claude Code CLI subscription (not billed per token); the Claude figure is an indicative estimate at 1 token ≈ 4 chars. Transcription priced per row by model.")
+            Text("Headline spend is transcription only. Style post-processing runs on the fast chat API (Groq/OpenAI); the styling figure is an indicative estimate at 1 token ≈ 4 chars. Transcription priced per row by model.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .padding(16)

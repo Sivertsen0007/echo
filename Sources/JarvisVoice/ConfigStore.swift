@@ -22,6 +22,24 @@ enum TranscriptionProvider: String, CaseIterable, Identifiable {
         }
     }
 
+    /// Chat-completions endpoint (OpenAI-compatible on both) - used for the
+    /// fast style post-processing pass.
+    var chatEndpoint: URL {
+        switch self {
+        case .openai: return URL(string: "https://api.openai.com/v1/chat/completions")!
+        case .groq: return URL(string: "https://api.groq.com/openai/v1/chat/completions")!
+        }
+    }
+
+    /// Model for style post-processing. Groq's llama-3.3-70b cleans text in
+    /// ~0.3s; gpt-4o-mini is OpenAI's fast, cheap equivalent.
+    var defaultStyleModel: String {
+        switch self {
+        case .openai: return "gpt-4o-mini"
+        case .groq: return "llama-3.3-70b-versatile"
+        }
+    }
+
     /// Default model per provider (used when the user hasn't picked one).
     var defaultModel: String {
         switch self {
@@ -174,5 +192,15 @@ final class ConfigStore: ObservableObject {
 
     var hasKeyForActiveProvider: Bool {
         apiKey(for: activeProvider) != nil
+    }
+
+    /// Provider used for the style post-processing chat call. Prefers Groq for
+    /// speed (~0.3s), else the active transcription provider, else OpenAI -
+    /// whichever has a usable key. Nil means no API styling is possible.
+    var styleProvider: TranscriptionProvider? {
+        if apiKey(for: .groq) != nil { return .groq }
+        if apiKey(for: activeProvider) != nil { return activeProvider }
+        if apiKey(for: .openai) != nil { return .openai }
+        return nil
     }
 }
