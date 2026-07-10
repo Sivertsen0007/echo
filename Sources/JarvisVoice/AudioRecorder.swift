@@ -1,14 +1,19 @@
 import AVFoundation
 import Cocoa
 
-/// Records 16kHz mono PCM to a temporary WAV file using AVAudioEngine.
-/// Writes via AVAudioFile (Core Audio handles WAV/CAF headers).
+/// Records mono 16 kHz PCM to a temporary WAV file using AVAudioEngine.
+/// Audio is captured at the input device's native rate and downsampled to
+/// 16 kHz mono via AVAudioConverter before writing. Whisper-family models run
+/// fine at 16 kHz, and the smaller file uploads roughly 3x faster than native
+/// 48 kHz - which is the round-trip latency the user feels on every dictation.
 final class AudioRecorder {
     private let engine = AVAudioEngine()
     private var audioFile: AVAudioFile?
     private var outputURL: URL?
     private var startedAt: Date?
     private let targetSampleRate: Double = 16000
+    private var converter: AVAudioConverter?
+    private var targetFormat: AVAudioFormat?
 
     func requestPermission(_ completion: @escaping (Bool) -> Void) {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
@@ -25,15 +30,28 @@ final class AudioRecorder {
         let inputNode = engine.inputNode
         let inputFormat = inputNode.outputFormat(forBus: 0)
 
-        // We'll write at the input's native sample rate to keep things simple,
-        // then let the API resample. Whisper accepts wide range of rates.
+        // Target: 16 kHz mono float32 processing format. The converter handles
+        // both the sample-rate drop and any channel down-mix from the input.
+        guard let target = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                         sampleRate: targetSampleRate,
+                                         channels: 1,
+                                         interleaved: false),
+              let converter = AVAudioConverter(from: inputFormat, to: target) else {
+            NSLog("Failed to build 16 kHz converter from input format \(inputFormat)")
+            return
+        }
+        targetFormat = target
+        self.converter = converter
+
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("jarvis-voice-\(UUID().uuidString).wav")
         outputURL = url
 
+        // On-disk WAV is 16 kHz mono 16-bit PCM. Processing buffers we hand to
+        // write(from:) are float32 (commonFormat below); AVAudioFile converts.
         let settings: [String: Any] = [
             AVFormatIDKey: kAudioFormatLinearPCM,
-            AVSampleRateKey: inputFormat.sampleRate,
+            AVSampleRateKey: targetSampleRate,
             AVNumberOfChannelsKey: 1,
             AVLinearPCMBitDepthKey: 16,
             AVLinearPCMIsFloatKey: false,
@@ -49,20 +67,53 @@ final class AudioRecorder {
         }
 
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
-            do {
-                try self?.audioFile?.write(from: buffer)
-            } catch {
-                NSLog("Audio write error: \(error)")
-            }
+            self?.append(buffer)
         }
 
         do {
             engine.prepare()
             try engine.start()
             startedAt = Date()
-            NSLog("Recording to \(url.lastPathComponent)")
+            NSLog("Recording to \(url.lastPathComponent) at \(Int(targetSampleRate)) Hz (input \(Int(inputFormat.sampleRate)) Hz)")
         } catch {
             NSLog("Engine start failed: \(error)")
+        }
+    }
+
+    /// Downsample one native tap buffer to 16 kHz mono and append to the file.
+    /// The converter keeps internal resampler state across calls, so feeding it
+    /// buffer-by-buffer produces a continuous 16 kHz stream.
+    private func append(_ buffer: AVAudioPCMBuffer) {
+        guard let converter = converter,
+              let targetFormat = targetFormat,
+              let audioFile = audioFile else { return }
+
+        let ratio = targetFormat.sampleRate / buffer.format.sampleRate
+        let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 1024
+        guard let outBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity) else { return }
+
+        var consumed = false
+        var error: NSError?
+        let status = converter.convert(to: outBuffer, error: &error) { _, inStatus in
+            if consumed {
+                inStatus.pointee = .noDataNow
+                return nil
+            }
+            consumed = true
+            inStatus.pointee = .haveData
+            return buffer
+        }
+
+        if let error = error {
+            NSLog("Audio convert error: \(error)")
+            return
+        }
+        guard status != .error, outBuffer.frameLength > 0 else { return }
+
+        do {
+            try audioFile.write(from: outBuffer)
+        } catch {
+            NSLog("Audio write error: \(error)")
         }
     }
 
@@ -71,9 +122,19 @@ final class AudioRecorder {
         engine.stop()
         let duration = startedAt.map { Date().timeIntervalSince($0) } ?? 0
         let url = outputURL
+
+        // Nil the file first so AVAudioFile flushes and closes before we stat it.
         audioFile = nil
+        converter = nil
+        targetFormat = nil
         outputURL = nil
         startedAt = nil
+
+        if let url = url,
+           let size = try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int {
+            NSLog("Recorded \(String(format: "%.1f", Double(size) / 1024))KB over \(String(format: "%.1f", duration))s")
+        }
+
         completion(url, duration)
     }
 }

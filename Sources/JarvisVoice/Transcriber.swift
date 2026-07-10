@@ -6,21 +6,24 @@ import Foundation
 final class Transcriber {
     private var promptBias: String { VocabStore.shared.promptBias() }
 
-    /// Result includes which provider was used so the caller can attribute cost.
+    /// Result includes which provider + model was used so the caller can
+    /// attribute cost and compare latency across models.
     struct Result {
         let text: String?
         let provider: TranscriptionProvider
+        let model: String
     }
 
     func transcribe(audioURL: URL, completion: @escaping (Result) -> Void) {
         let provider = ConfigStore.shared.activeProvider
+        let model = ConfigStore.shared.model(for: provider)
         guard let apiKey = ConfigStore.shared.apiKey(for: provider) else {
             NSLog("Missing \(provider.displayName) API key. Configure it in Settings.")
-            completion(Result(text: nil, provider: provider))
+            completion(Result(text: nil, provider: provider, model: model))
             return
         }
         guard let audioData = try? Data(contentsOf: audioURL) else {
-            completion(Result(text: nil, provider: provider))
+            completion(Result(text: nil, provider: provider, model: model))
             return
         }
 
@@ -36,7 +39,7 @@ final class Transcriber {
             body.append("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n".data(using: .utf8)!)
             body.append("\(value)\r\n".data(using: .utf8)!)
         }
-        appendField("model", provider.defaultModel)
+        appendField("model", model)
         appendField("prompt", promptBias)
         appendField("response_format", "json")
         appendField("temperature", "0")
@@ -53,11 +56,11 @@ final class Transcriber {
             defer { try? FileManager.default.removeItem(at: audioURL) }
             if let error = error {
                 NSLog("Transcribe error (\(provider.displayName)): \(error)")
-                completion(Result(text: nil, provider: provider)); return
+                completion(Result(text: nil, provider: provider, model: model)); return
             }
             guard let data = data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                completion(Result(text: nil, provider: provider)); return
+                completion(Result(text: nil, provider: provider, model: model)); return
             }
             let elapsed = Date().timeIntervalSince(started)
             if let text = json["text"] as? String {
@@ -66,12 +69,12 @@ final class Transcriber {
                 let promptTrim = self.promptBias.trimmingCharacters(in: .whitespacesAndNewlines)
                 if cleaned == promptTrim {
                     NSLog("Discarded echoed prompt")
-                    completion(Result(text: nil, provider: provider)); return
+                    completion(Result(text: nil, provider: provider, model: model)); return
                 }
-                completion(Result(text: text, provider: provider))
+                completion(Result(text: text, provider: provider, model: model))
             } else {
                 NSLog("Transcribe response from \(provider.displayName): \(json)")
-                completion(Result(text: nil, provider: provider))
+                completion(Result(text: nil, provider: provider, model: model))
             }
         }.resume()
     }

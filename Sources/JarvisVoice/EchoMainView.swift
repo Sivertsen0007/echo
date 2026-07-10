@@ -318,6 +318,7 @@ struct InsightsView: View {
     @State private var daily: [Database.DailyStats] = []
     @State private var topApps: [Database.AppUsage] = []
     @State private var avgLatency: Double = 0
+    @State private var modelLatency: [Database.ModelLatency] = []
     @State private var rangeDays: Int = 30
     @State private var costRange: Database.CostBreakdown = .init(whisperUSD: 0, llmUSD: 0, audioSeconds: 0, llmInputChars: 0, llmOutputChars: 0)
     @State private var costAllTime: Database.CostBreakdown = .init(whisperUSD: 0, llmUSD: 0, audioSeconds: 0, llmInputChars: 0, llmOutputChars: 0)
@@ -349,6 +350,9 @@ struct InsightsView: View {
                         topAppsCard
                         latencyCard
                     }
+                    if modelLatency.count > 1 {
+                        modelLatencyCard
+                    }
                     costsCard
                     costPerDayChart
                 }
@@ -364,6 +368,7 @@ struct InsightsView: View {
         daily = Database.shared.dailyStats(days: rangeDays).reversed()
         topApps = Database.shared.topApps(days: rangeDays, limit: 8)
         avgLatency = Database.shared.averageLatency(days: rangeDays)
+        modelLatency = Database.shared.latencyByModel(days: rangeDays)
         costRange = Database.shared.costLast(days: rangeDays)
         costAllTime = Database.shared.costAllTime()
         costsByDay = Database.shared.costsByDay(days: rangeDays)
@@ -510,6 +515,30 @@ struct InsightsView: View {
             Text(String(format: "%.2f s", avgLatency))
                 .font(.system(size: 30, weight: .semibold))
             Text("Time from Fn stop to text inserted (Whisper roundtrip only).")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(NSColor.controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    /// Latency compared across the models you've actually used - the tool for
+    /// picking a default. Fastest model first.
+    private var modelLatencyCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("LATENCY BY MODEL").font(.caption).foregroundStyle(.secondary)
+            ForEach(Array(modelLatency.enumerated()), id: \.offset) { _, row in
+                HStack {
+                    Text(row.model).font(.system(.body, design: .monospaced))
+                    Spacer()
+                    Text("\(row.count) rec").font(.caption).foregroundStyle(.secondary)
+                    Text(String(format: "%.2f s", row.avgLatencySeconds))
+                        .font(.body.weight(.semibold))
+                        .frame(width: 70, alignment: .trailing)
+                }
+            }
+            Text("Average roundtrip per model over the range. Dictate the same phrases under each model to compare fairly.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .padding(16)
@@ -1086,6 +1115,26 @@ struct SettingsView: View {
                     }
                     .pickerStyle(.menu).labelsHidden()
                     Text("Echo uses your selected provider for transcription. Both expose the same Whisper API. Groq is currently ~4.5x cheaper than OpenAI and faster.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(NSColor.controlBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+
+                let modelProvider = config.activeProvider
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("TRANSCRIPTION MODEL").font(.caption).foregroundStyle(.secondary)
+                    Picker("Model", selection: Binding(
+                        get: { config.model(for: modelProvider) },
+                        set: { config.setModel($0, for: modelProvider) }
+                    )) {
+                        ForEach(modelProvider.availableModels) { m in
+                            Text("\(m.label)  ·  $\(String(format: "%.4f", m.usdPerMinute))/min").tag(m.id)
+                        }
+                    }
+                    .pickerStyle(.menu).labelsHidden()
+                    Text("Model used for \(modelProvider.displayName). Faster/cheaper vs. more accurate - compare real latency per model under Insights.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 .padding(16)

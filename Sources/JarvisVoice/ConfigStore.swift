@@ -22,7 +22,7 @@ enum TranscriptionProvider: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Default model per provider. User can override later if we add a picker.
+    /// Default model per provider (used when the user hasn't picked one).
     var defaultModel: String {
         switch self {
         case .openai: return "gpt-4o-mini-transcribe"
@@ -30,7 +30,37 @@ enum TranscriptionProvider: String, CaseIterable, Identifiable {
         }
     }
 
-    /// USD per minute of audio - for the cost dashboard.
+    /// One selectable model. `usdPerMinute` feeds the cost dashboard; update the
+    /// rates here if OpenAI/Groq change their published prices.
+    struct ModelOption: Identifiable, Hashable {
+        let id: String       // API model name
+        let label: String    // shown in the Settings picker
+        let usdPerMinute: Double
+    }
+
+    /// Models the user can choose between per provider. First entry = default.
+    var availableModels: [ModelOption] {
+        switch self {
+        case .openai:
+            return [
+                ModelOption(id: "gpt-4o-mini-transcribe", label: "gpt-4o-mini-transcribe - fast, cheap", usdPerMinute: 0.003),
+                ModelOption(id: "gpt-4o-transcribe", label: "gpt-4o-transcribe - most accurate", usdPerMinute: 0.006),
+                ModelOption(id: "whisper-1", label: "whisper-1 - classic Whisper", usdPerMinute: 0.006)
+            ]
+        case .groq:
+            return [
+                ModelOption(id: "whisper-large-v3-turbo", label: "whisper-large-v3-turbo - fastest", usdPerMinute: 0.000667),
+                ModelOption(id: "whisper-large-v3", label: "whisper-large-v3 - most accurate", usdPerMinute: 0.00185)
+            ]
+        }
+    }
+
+    /// USD per minute for a specific model, falling back to the default rate.
+    func price(forModel model: String) -> Double {
+        availableModels.first { $0.id == model }?.usdPerMinute ?? pricePerMinute
+    }
+
+    /// USD per minute for the provider's default model - for legacy displays.
     var pricePerMinute: Double {
         switch self {
         case .openai: return 0.003     // gpt-4o-mini-transcribe
@@ -54,6 +84,8 @@ struct ConfigData: Codable {
     var provider: String?
     var openai_api_key: String?
     var groq_api_key: String?
+    var openai_model: String?
+    var groq_model: String?
 }
 
 final class ConfigStore: ObservableObject {
@@ -92,6 +124,29 @@ final class ConfigStore: ObservableObject {
 
     func setProvider(_ p: TranscriptionProvider) {
         data.provider = p.rawValue
+        save()
+    }
+
+    /// The model to use for a provider: the user's saved choice if it's still a
+    /// valid option, otherwise the provider default.
+    func model(for provider: TranscriptionProvider) -> String {
+        let saved: String?
+        switch provider {
+        case .openai: saved = data.openai_model
+        case .groq: saved = data.groq_model
+        }
+        if let m = saved, !m.isEmpty,
+           provider.availableModels.contains(where: { $0.id == m }) {
+            return m
+        }
+        return provider.defaultModel
+    }
+
+    func setModel(_ model: String, for provider: TranscriptionProvider) {
+        switch provider {
+        case .openai: data.openai_model = model
+        case .groq: data.groq_model = model
+        }
         save()
     }
 

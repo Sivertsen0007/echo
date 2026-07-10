@@ -146,13 +146,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let latency = Date().timeIntervalSince(transcribeStart)
                 let raw = result.text ?? ""
                 let providerId = result.provider.rawValue
+                let modelId = result.model
                 guard !raw.isEmpty else {
                     DispatchQueue.main.async {
                         Database.shared.logTranscription(
                             rawText: "", finalText: "", audioDuration: duration,
                             latency: latency, appBundleId: appBundle, appName: appName,
                             styleUsed: nil, stylePromptChars: 0,
-                            provider: providerId, discarded: true)
+                            provider: providerId, model: modelId, discarded: true)
                         self.state = .idle
                         self.setIdle()
                     }
@@ -180,7 +181,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         latency: latency, appBundleId: appBundle, appName: appName,
                         styleUsed: stylePreset.id,
                         stylePromptChars: stylePreset.systemPrompt.count,
-                        provider: providerId,
+                        provider: providerId, model: modelId,
                         discarded: corrected.isEmpty)
                     self.state = .idle
                     self.setIdle()

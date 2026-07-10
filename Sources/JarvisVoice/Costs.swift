@@ -18,8 +18,13 @@ enum Costs {
         (audioSeconds / 60.0) * whisperUSDPerMinute
     }
 
-    static func transcribeCost(audioSeconds: Double, provider: String?) -> Double {
-        let rate = TranscriptionProvider(rawValue: provider ?? "")?.pricePerMinute ?? whisperUSDPerMinute
+    static func transcribeCost(audioSeconds: Double, provider: String?, model: String? = nil) -> Double {
+        guard let p = TranscriptionProvider(rawValue: provider ?? "") else {
+            return (audioSeconds / 60.0) * whisperUSDPerMinute
+        }
+        // Prefer the row's actual model rate; fall back to the provider default
+        // for legacy rows recorded before we stored the model.
+        let rate = model.map { p.price(forModel: $0) } ?? p.pricePerMinute
         return (audioSeconds / 60.0) * rate
     }
 

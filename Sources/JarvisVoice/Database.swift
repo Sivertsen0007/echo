@@ -66,6 +66,12 @@ final class Database {
             exec("ALTER TABLE transcriptions ADD COLUMN provider TEXT;")
             setUserVersion(3)
         }
+        if current < 4 {
+            // Which model produced this row. Enables per-model cost attribution
+            // and latency comparison. Null = legacy (use provider default rate).
+            exec("ALTER TABLE transcriptions ADD COLUMN model TEXT;")
+            setUserVersion(4)
+        }
     }
 
     private func userVersion() -> Int {
@@ -93,15 +99,15 @@ final class Database {
     func logTranscription(rawText: String, finalText: String, audioDuration: TimeInterval,
                           latency: TimeInterval, appBundleId: String?, appName: String?,
                           styleUsed: String? = nil, stylePromptChars: Int = 0,
-                          provider: String? = nil,
+                          provider: String? = nil, model: String? = nil,
                           discarded: Bool = false) {
         queue.async { [weak self] in
             guard let self = self, let db = self.db else { return }
             let sql = """
                 INSERT INTO transcriptions
                   (created_at, raw_text, final_text, audio_duration_s, latency_s,
-                   app_bundle_id, app_name, word_count, discarded, style_used, style_prompt_chars, provider)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                   app_bundle_id, app_name, word_count, discarded, style_used, style_prompt_chars, provider, model)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """
             var stmt: OpaquePointer?
             defer { sqlite3_finalize(stmt) }
@@ -125,6 +131,7 @@ final class Database {
             if let s = styleUsed { sqlite3_bind_text(stmt, 10, s, -1, transient) } else { sqlite3_bind_null(stmt, 10) }
             sqlite3_bind_int(stmt, 11, Int32(stylePromptChars))
             if let p = provider { sqlite3_bind_text(stmt, 12, p, -1, transient) } else { sqlite3_bind_null(stmt, 12) }
+            if let m = model { sqlite3_bind_text(stmt, 13, m, -1, transient) } else { sqlite3_bind_null(stmt, 13) }
             if sqlite3_step(stmt) != SQLITE_DONE {
                 NSLog("insert failed: \(String(cString: sqlite3_errmsg(db)))")
             }
@@ -364,7 +371,7 @@ final class Database {
             guard let self = self, let db = self.db else { return }
             let whereExtra = sinceClause.map { "AND created_at >= datetime('now', '\($0)')" } ?? ""
             let sql = """
-                SELECT audio_duration_s, COALESCE(provider, 'openai'),
+                SELECT audio_duration_s, COALESCE(provider, 'openai'), model,
                        CASE WHEN style_used IS NOT NULL AND style_used != 'raw'
                             THEN length(raw_text) + style_prompt_chars ELSE 0 END,
                        CASE WHEN style_used IS NOT NULL AND style_used != 'raw'
@@ -378,10 +385,11 @@ final class Database {
             while sqlite3_step(stmt) == SQLITE_ROW {
                 let s = sqlite3_column_double(stmt, 0)
                 let provider = String(cString: sqlite3_column_text(stmt, 1))
+                let model = sqlite3_column_text(stmt, 2).map { String(cString: $0) }
                 audio += s
-                transcribeUSD += Costs.transcribeCost(audioSeconds: s, provider: provider)
-                inChars += Int(sqlite3_column_int64(stmt, 2))
-                outChars += Int(sqlite3_column_int64(stmt, 3))
+                transcribeUSD += Costs.transcribeCost(audioSeconds: s, provider: provider, model: model)
+                inChars += Int(sqlite3_column_int64(stmt, 3))
+                outChars += Int(sqlite3_column_int64(stmt, 4))
             }
         }
         return CostBreakdown(
@@ -410,7 +418,7 @@ final class Database {
             guard let self = self, let db = self.db else { return }
             let sql = """
                 SELECT substr(created_at, 1, 10) AS d,
-                       audio_duration_s, COALESCE(provider, 'openai'),
+                       audio_duration_s, COALESCE(provider, 'openai'), model,
                        CASE WHEN style_used IS NOT NULL AND style_used != 'raw'
                             THEN length(raw_text) + style_prompt_chars ELSE 0 END,
                        CASE WHEN style_used IS NOT NULL AND style_used != 'raw'
@@ -429,9 +437,10 @@ final class Database {
                 let date = String(cString: sqlite3_column_text(stmt, 0))
                 let audio = sqlite3_column_double(stmt, 1)
                 let provider = String(cString: sqlite3_column_text(stmt, 2))
-                let inChars = Int(sqlite3_column_int64(stmt, 3))
-                let outChars = Int(sqlite3_column_int64(stmt, 4))
-                let cost = Costs.transcribeCost(audioSeconds: audio, provider: provider)
+                let model = sqlite3_column_text(stmt, 3).map { String(cString: $0) }
+                let inChars = Int(sqlite3_column_int64(stmt, 4))
+                let outChars = Int(sqlite3_column_int64(stmt, 5))
+                let cost = Costs.transcribeCost(audioSeconds: audio, provider: provider, model: model)
                          + Costs.llmCost(inputChars: inChars, outputChars: outChars)
                 perDay[date, default: 0] += cost
             }
@@ -459,6 +468,47 @@ final class Database {
             }
         }
         return avg
+    }
+
+    struct ModelLatency {
+        let model: String           // "(legacy)" for rows recorded before v4
+        let count: Int
+        let avgLatencySeconds: Double
+        let avgDurationSeconds: Double
+    }
+
+    /// Average round-trip latency grouped by model over the last `days`.
+    /// This is the comparison tool for choosing a default: dictate the same
+    /// phrases under each model, then read the per-model averages here.
+    /// Sorted fastest-first.
+    func latencyByModel(days: Int = 30) -> [ModelLatency] {
+        var result: [ModelLatency] = []
+        queue.sync { [weak self] in
+            guard let self = self, let db = self.db else { return }
+            let sql = """
+                SELECT COALESCE(model, '(legacy)') AS m,
+                       COUNT(*), AVG(latency_s), AVG(audio_duration_s)
+                FROM transcriptions
+                WHERE discarded = 0 AND latency_s > 0
+                  AND created_at >= datetime('now', ?)
+                GROUP BY m
+                ORDER BY AVG(latency_s) ASC;
+            """
+            var stmt: OpaquePointer?
+            defer { sqlite3_finalize(stmt) }
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+            let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+            sqlite3_bind_text(stmt, 1, "-\(days) days", -1, transient)
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                result.append(ModelLatency(
+                    model: String(cString: sqlite3_column_text(stmt, 0)),
+                    count: Int(sqlite3_column_int(stmt, 1)),
+                    avgLatencySeconds: sqlite3_column_double(stmt, 2),
+                    avgDurationSeconds: sqlite3_column_double(stmt, 3)
+                ))
+            }
+        }
+        return result
     }
 
     /// Day streak: number of consecutive calendar days ending today with >= 1 transcription.
