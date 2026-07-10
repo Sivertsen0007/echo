@@ -20,7 +20,7 @@ cp -R build/JarvisVoice.app "$DEST"
 
 # Re-sign in place with the stable identity if available.
 IDENTITY="Echo Local Signing"
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "$IDENTITY"; then
+if security find-identity -p codesigning 2>/dev/null | grep -q "$IDENTITY"; then
   codesign --force --deep --sign "$IDENTITY" "$DEST"
 fi
 

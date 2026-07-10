@@ -14,9 +14,9 @@ set -euo pipefail
 CERT_NAME="Echo Local Signing"
 KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
 
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "$CERT_NAME"; then
+if security find-identity -p codesigning 2>/dev/null | grep -q "$CERT_NAME"; then
   echo "Signing identity '$CERT_NAME' already exists - nothing to do."
-  security find-identity -v -p codesigning | grep "$CERT_NAME"
+  security find-identity -p codesigning | grep "$CERT_NAME"
   exit 0
 fi
 
@@ -46,6 +46,6 @@ security import "$TMP/echo.p12" -k "$KEYCHAIN" -P echo -A
 
 echo ""
 echo "Done. Signing identities:"
-security find-identity -v -p codesigning | grep "$CERT_NAME"
+security find-identity -p codesigning | grep "$CERT_NAME"
 echo ""
 echo "Next: ./install.sh   (builds, signs with this identity, installs to /Applications/Echo.app)"

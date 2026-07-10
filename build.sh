@@ -23,7 +23,9 @@ cp Resources/Info.plist "$APP/Contents/Info.plist"
 # (mic/accessibility) grants across rebuilds. Falls back to ad-hoc otherwise
 # (grants won't persist - run scripts/setup-signing.sh once to fix).
 IDENTITY="Echo Local Signing"
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "$IDENTITY"; then
+# No -v: a self-signed identity is usable for signing but reads as "not trusted",
+# so -v (valid only) would hide it and we'd wrongly fall back to ad-hoc.
+if security find-identity -p codesigning 2>/dev/null | grep -q "$IDENTITY"; then
   echo "==> Signing with '$IDENTITY'"
   codesign --force --deep --sign "$IDENTITY" "$APP"
 else
