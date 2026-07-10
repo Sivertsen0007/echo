@@ -83,6 +83,10 @@ final class TransformsStore: ObservableObject {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         self.url = dir.appendingPathComponent("transforms.json")
         load()
+        // Reload live state on backup import - no restart needed.
+        NotificationCenter.default.addObserver(forName: .backupImported, object: nil, queue: .main) { [weak self] _ in
+            self?.load()
+        }
     }
 
     private func load() {

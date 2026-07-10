@@ -45,6 +45,11 @@ final class VocabStore: ObservableObject {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         self.url = dir.appendingPathComponent("vocab.json")
         load()
+        // Reload live state when a backup is imported so changes take effect
+        // without an app restart.
+        NotificationCenter.default.addObserver(forName: .backupImported, object: nil, queue: .main) { [weak self] _ in
+            self?.load()
+        }
     }
 
     func load() {

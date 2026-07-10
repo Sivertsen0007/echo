@@ -95,6 +95,19 @@ final class StyleStore: ObservableObject {
             self.defaultStyleId = StylePreset.raw.id
         }
         save()
+        // Reload the default style on backup import - no restart needed.
+        NotificationCenter.default.addObserver(forName: .backupImported, object: nil, queue: .main) { [weak self] _ in
+            self?.reloadFromDisk()
+        }
+    }
+
+    /// Re-read the persisted default style from disk (after a backup import).
+    private func reloadFromDisk() {
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let id = json["default_style_id"] as? String,
+              StylePreset.all.contains(where: { $0.id == id }) else { return }
+        if defaultStyleId != id { defaultStyleId = id }
     }
 
     private func save() {

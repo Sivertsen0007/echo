@@ -149,6 +149,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let modelId = result.model
                 guard !raw.isEmpty else {
                     DispatchQueue.main.async {
+                        // Transcription failed or came back empty - give an
+                        // audible cue instead of failing silently.
+                        AudioFeedback.playError()
                         Database.shared.logTranscription(
                             rawText: "", finalText: "", audioDuration: duration,
                             latency: latency, appBundleId: appBundle, appName: appName,

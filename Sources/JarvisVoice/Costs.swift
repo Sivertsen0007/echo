@@ -14,10 +14,6 @@ enum Costs {
     /// Token ≈ char heuristic. Good enough for spend estimates.
     static let charsPerToken: Double = 4.0
 
-    static func whisperCost(audioSeconds: Double) -> Double {
-        (audioSeconds / 60.0) * whisperUSDPerMinute
-    }
-
     static func transcribeCost(audioSeconds: Double, provider: String?, model: String? = nil) -> Double {
         guard let p = TranscriptionProvider(rawValue: provider ?? "") else {
             return (audioSeconds / 60.0) * whisperUSDPerMinute

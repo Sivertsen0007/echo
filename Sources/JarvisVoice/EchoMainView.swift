@@ -86,8 +86,8 @@ struct HomeView: View {
                     statCard(value: formattedWords, label: "total words")
                     statCard(value: String(format: "%.0f", wpm), label: "wpm")
                     statCard(value: "\(streak)", label: "day streak")
-                    statCard(value: String(format: "$%.2f", monthCost.totalUSD), label: "this month")
-                        .help("Whisper $\(String(format: "%.3f", monthCost.whisperUSD)) + Claude $\(String(format: "%.3f", monthCost.llmUSD))")
+                    statCard(value: String(format: "$%.2f", monthCost.whisperUSD), label: "this month")
+                        .help("Transcription API spend this month. Claude styling runs on your Claude Code CLI subscription - not billed per token (est. $\(String(format: "%.3f", monthCost.llmUSD))).")
                 }
 
                 Text("RECENT")
@@ -451,13 +451,13 @@ struct InsightsView: View {
             Text("API SPEND").font(.caption).foregroundStyle(.secondary)
             HStack(alignment: .firstTextBaseline, spacing: 24) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(String(format: "$%.2f", costRange.totalUSD))
+                    Text(String(format: "$%.2f", costRange.whisperUSD))
                         .font(.system(size: 30, weight: .semibold))
                     Text("last \(rangeDays) days").foregroundStyle(.secondary).font(.callout)
                 }
                 Divider().frame(height: 50)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(String(format: "$%.2f", costAllTime.totalUSD))
+                    Text(String(format: "$%.2f", costAllTime.whisperUSD))
                         .font(.system(size: 22, weight: .medium))
                         .foregroundStyle(.secondary)
                     Text("all-time").foregroundStyle(.secondary).font(.callout)
@@ -465,12 +465,12 @@ struct InsightsView: View {
                 Spacer()
             }
             HStack(spacing: 18) {
-                costBadge("Whisper", value: costRange.whisperUSD,
+                costBadge("Transcription", value: costRange.whisperUSD,
                           note: String(format: "%.1f min audio", costRange.audioSeconds / 60))
-                costBadge("Claude", value: costRange.llmUSD,
-                          note: "\(costRange.llmInputChars / 4 + costRange.llmOutputChars / 4) tokens est.")
+                costBadge("Claude (est.)", value: costRange.llmUSD,
+                          note: "unbilled - CLI subscription")
             }
-            Text("Tokens estimated at 1 token ≈ 4 chars. Pricing: Whisper $\(String(format: "%.3f", Costs.whisperUSDPerMinute))/min, Haiku $\(String(format: "%.0f", Costs.haikuInputUSDPerMTokens))/M in + $\(String(format: "%.0f", Costs.haikuOutputUSDPerMTokens))/M out.")
+            Text("Headline spend is transcription only. Claude styling runs on your Claude Code CLI subscription (not billed per token); the Claude figure is an indicative estimate at 1 token ≈ 4 chars. Transcription priced per row by model.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .padding(16)
@@ -1321,26 +1321,6 @@ struct ScratchpadView: View {
         }
         saveDebounce = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
-    }
-}
-
-// MARK: - Placeholder
-
-struct PlaceholderView: View {
-    let title: String
-    let note: String
-    var body: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "hammer")
-                .font(.system(size: 40))
-                .foregroundStyle(.secondary)
-            Text(title).font(.title2.weight(.semibold))
-            Text(note)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 360)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
