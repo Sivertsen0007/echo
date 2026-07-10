@@ -1103,6 +1103,25 @@ struct SettingsView: View {
                 .background(Color(NSColor.controlBackgroundColor))
                 .clipShape(RoundedRectangle(cornerRadius: 10))
 
+                let inputDevices = AudioDevices.inputDevices()
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("MICROPHONE").font(.caption).foregroundStyle(.secondary)
+                    Picker("Microphone", selection: Binding(
+                        get: { config.inputDeviceUID ?? "" },
+                        set: { config.setInputDeviceUID($0.isEmpty ? nil : $0) }
+                    )) {
+                        Text("System Default").tag("")
+                        ForEach(inputDevices) { d in Text(d.name).tag(d.uid) }
+                    }
+                    .pickerStyle(.menu).labelsHidden()
+                    Text("Which mic Echo records from. System Default follows your Mac's input setting; pick your built-in mic here to use it regardless of connected AirPods/headsets.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(NSColor.controlBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+
                 VStack(alignment: .leading, spacing: 12) {
                     Text("TRANSCRIPTION PROVIDER").font(.caption).foregroundStyle(.secondary)
                     Picker("Provider", selection: Binding(

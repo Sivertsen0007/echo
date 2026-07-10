@@ -1,0 +1,92 @@
+import CoreAudio
+import Foundation
+
+/// One selectable audio input device.
+struct AudioInputDevice: Identifiable, Hashable {
+    let id: AudioDeviceID
+    let uid: String   // stable across reconnects; what we persist
+    let name: String
+}
+
+/// Thin CoreAudio wrapper to enumerate input devices and resolve the current
+/// system default, so Echo can record from a chosen mic (or follow default).
+enum AudioDevices {
+    /// All devices that expose at least one input channel.
+    static func inputDevices() -> [AudioInputDevice] {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var size = UInt32(0)
+        guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size) == noErr else { return [] }
+        let count = Int(size) / MemoryLayout<AudioDeviceID>.size
+        var ids = [AudioDeviceID](repeating: 0, count: count)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &ids) == noErr else { return [] }
+
+        return ids.compactMap { id in
+            guard hasInput(id),
+                  let name = stringProperty(id, kAudioObjectPropertyName),
+                  let uid = stringProperty(id, kAudioDevicePropertyDeviceUID) else { return nil }
+            return AudioInputDevice(id: id, uid: uid, name: name)
+        }
+    }
+
+    /// Resolve a persisted UID to a live device id (nil if unplugged).
+    static func device(forUID uid: String) -> AudioDeviceID? {
+        inputDevices().first { $0.uid == uid }?.id
+    }
+
+    /// The device name for a UID, for display/logging.
+    static func name(forUID uid: String) -> String? {
+        inputDevices().first { $0.uid == uid }?.name
+    }
+
+    /// The current system default input device.
+    static func defaultInputDevice() -> AudioDeviceID? {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var id = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &id) == noErr,
+              id != 0 else { return nil }
+        return id
+    }
+
+    static func name(for id: AudioDeviceID) -> String? {
+        stringProperty(id, kAudioObjectPropertyName)
+    }
+
+    // MARK: - Helpers
+
+    private static func hasInput(_ id: AudioDeviceID) -> Bool {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreamConfiguration,
+            mScope: kAudioObjectPropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain)
+        var size = UInt32(0)
+        guard AudioObjectGetPropertyDataSize(id, &addr, 0, nil, &size) == noErr, size > 0 else { return false }
+        let raw = UnsafeMutableRawPointer.allocate(byteCount: Int(size),
+                                                   alignment: MemoryLayout<AudioBufferList>.alignment)
+        defer { raw.deallocate() }
+        guard AudioObjectGetPropertyData(id, &addr, 0, nil, &size, raw) == noErr else { return false }
+        let list = UnsafeMutableAudioBufferListPointer(raw.assumingMemoryBound(to: AudioBufferList.self))
+        return list.contains { $0.mNumberChannels > 0 }
+    }
+
+    private static func stringProperty(_ id: AudioDeviceID, _ selector: AudioObjectPropertySelector) -> String? {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: selector,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var value: CFString = "" as CFString
+        var size = UInt32(MemoryLayout<CFString>.size)
+        let status = withUnsafeMutablePointer(to: &value) {
+            AudioObjectGetPropertyData(id, &addr, 0, nil, &size, $0)
+        }
+        guard status == noErr else { return nil }
+        let s = value as String
+        return s.isEmpty ? nil : s
+    }
+}

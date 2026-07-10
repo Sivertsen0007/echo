@@ -1,4 +1,5 @@
 import AVFoundation
+import AudioToolbox
 import Cocoa
 
 /// Records mono 16 kHz PCM to a temporary WAV file using AVAudioEngine.
@@ -6,8 +7,12 @@ import Cocoa
 /// 16 kHz mono via AVAudioConverter before writing. Whisper-family models run
 /// fine at 16 kHz, and the smaller file uploads roughly 3x faster than native
 /// 48 kHz - which is the round-trip latency the user feels on every dictation.
+///
+/// A fresh AVAudioEngine is built for each recording so device changes are
+/// honoured: without this the engine stays pinned to whatever input device was
+/// default when the app launched (e.g. AirPods), ignoring later switches.
 final class AudioRecorder {
-    private let engine = AVAudioEngine()
+    private var engine = AVAudioEngine()
     private var audioFile: AVAudioFile?
     private var outputURL: URL?
     private var startedAt: Date?
@@ -31,7 +36,10 @@ final class AudioRecorder {
     }
 
     func start() {
+        // Fresh engine each time so it picks up the current input device.
+        engine = AVAudioEngine()
         let inputNode = engine.inputNode
+        selectInputDevice(on: inputNode)
         let inputFormat = inputNode.outputFormat(forBus: 0)
 
         // Target: 16 kHz mono float32 processing format. The converter handles
@@ -81,6 +89,29 @@ final class AudioRecorder {
             NSLog("Recording to \(url.lastPathComponent) at \(Int(targetSampleRate)) Hz (input \(Int(inputFormat.sampleRate)) Hz)")
         } catch {
             NSLog("Engine start failed: \(error)")
+        }
+    }
+
+    /// Point the engine's input node at the user's chosen mic, or the current
+    /// system default when none is chosen / the chosen one is unplugged. Must
+    /// run before we read the input format or install the tap.
+    private func selectInputDevice(on node: AVAudioInputNode) {
+        let deviceID: AudioDeviceID?
+        if let uid = ConfigStore.shared.inputDeviceUID {
+            deviceID = AudioDevices.device(forUID: uid) ?? AudioDevices.defaultInputDevice()
+        } else {
+            deviceID = AudioDevices.defaultInputDevice()
+        }
+        guard let dev = deviceID, let unit = node.audioUnit else { return }
+        var id = dev
+        let status = AudioUnitSetProperty(unit,
+                                          kAudioOutputUnitProperty_CurrentDevice,
+                                          kAudioUnitScope_Global, 0,
+                                          &id, UInt32(MemoryLayout<AudioDeviceID>.size))
+        if status != noErr {
+            NSLog("Could not set input device (\(status)); using engine default")
+        } else {
+            NSLog("Recording from input device: \(AudioDevices.name(for: dev) ?? "id \(dev)")")
         }
     }
 

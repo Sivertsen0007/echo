@@ -104,6 +104,7 @@ struct ConfigData: Codable {
     var groq_api_key: String?
     var openai_model: String?
     var groq_model: String?
+    var input_device_uid: String?   // nil = follow system default input
 }
 
 final class ConfigStore: ObservableObject {
@@ -192,6 +193,17 @@ final class ConfigStore: ObservableObject {
 
     var hasKeyForActiveProvider: Bool {
         apiKey(for: activeProvider) != nil
+    }
+
+    /// Persisted input-device UID, or nil to follow the system default mic.
+    var inputDeviceUID: String? {
+        let v = data.input_device_uid
+        return (v?.isEmpty == false) ? v : nil
+    }
+
+    func setInputDeviceUID(_ uid: String?) {
+        data.input_device_uid = (uid?.isEmpty == false) ? uid : nil
+        save()
     }
 
     /// Provider used for the style post-processing chat call. Prefers Groq for
