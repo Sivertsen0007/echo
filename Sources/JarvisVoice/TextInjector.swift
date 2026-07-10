@@ -26,13 +26,15 @@ final class TextInjector {
             NSLog("Inserted via AX direct-insert")
             return
         }
+        NSLog("Inserted via Cmd+V paste (AX unavailable/unverified)")
         insertViaPaste(text)
     }
 
     // MARK: - AX direct-insert
 
-    /// Returns true only if the text was written into a settable editable-text
-    /// element. Any uncertainty returns false so the caller falls back to paste.
+    /// Returns true only if the text was verifiably written into the focused
+    /// editable element. Any uncertainty returns false so the caller falls back
+    /// to paste.
     private func insertViaAX(_ text: String) -> Bool {
         let system = AXUIElementCreateSystemWide()
         var focusedRef: CFTypeRef?
@@ -41,9 +43,7 @@ final class TextInjector {
         // A focused UI element is always an AXUIElement.
         let element = focused as! AXUIElement
 
-        // Restrict to real editable text roles - web/Electron controls that
-        // merely echo a settable AXValue would accept the write without actually
-        // inserting, silently losing the dictation.
+        // Restrict to real editable text roles.
         var roleRef: CFTypeRef?
         AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef)
         let editableRoles: Set<String> = [
@@ -57,10 +57,40 @@ final class TextInjector {
         guard AXUIElementIsAttributeSettable(element, kAXSelectedTextAttribute as CFString, &settable) == .success,
               settable.boolValue else { return false }
 
+        // Terminals (Terminal.app, iTerm, Warp, ...) report the attribute
+        // settable and return .success from the write, but silently ignore it.
+        // So we snapshot the element before and after and only claim success if
+        // the content or caret actually moved. Otherwise -> paste fallback.
+        let before = axSnapshot(element)
+
         // Setting selected text replaces the current selection, or inserts at the
         // caret when the selection is empty - i.e. exactly what typing would do.
-        let status = AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFString)
-        return status == .success
+        guard AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFString) == .success else {
+            return false
+        }
+
+        let after = axSnapshot(element)
+        return after != before
+    }
+
+    /// A cheap fingerprint of an editable element's state (character count +
+    /// caret offset), used to confirm an AX write actually took effect without
+    /// materialising the whole (possibly huge) text value.
+    private func axSnapshot(_ element: AXUIElement) -> String {
+        var numRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(element, kAXNumberOfCharactersAttribute as CFString, &numRef)
+        let numChars = (numRef as? Int) ?? -1
+
+        var loc = -1
+        var rangeRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
+           let rangeRef = rangeRef {
+            var range = CFRange()
+            if AXValueGetValue(rangeRef as! AXValue, .cfRange, &range) {
+                loc = range.location
+            }
+        }
+        return "\(numChars)|\(loc)"
     }
 
     // MARK: - Cmd+V paste fallback

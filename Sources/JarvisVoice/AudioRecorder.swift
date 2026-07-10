@@ -15,6 +15,10 @@ final class AudioRecorder {
     private var converter: AVAudioConverter?
     private var targetFormat: AVAudioFormat?
 
+    /// Called on the main queue with a normalised input level (0...1) per audio
+    /// buffer, for driving a live waveform. Set by the host.
+    var onLevel: ((Float) -> Void)?
+
     func requestPermission(_ completion: @escaping (Bool) -> Void) {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized: completion(true)
@@ -88,6 +92,8 @@ final class AudioRecorder {
               let targetFormat = targetFormat,
               let audioFile = audioFile else { return }
 
+        emitLevel(from: buffer)
+
         let ratio = targetFormat.sampleRate / buffer.format.sampleRate
         let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 1024
         guard let outBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity) else { return }
@@ -115,6 +121,21 @@ final class AudioRecorder {
         } catch {
             NSLog("Audio write error: \(error)")
         }
+    }
+
+    /// RMS of the buffer mapped to a 0...1 level (roughly -50 dB..0 dB) for the
+    /// waveform. Cheap enough to run per buffer on the audio thread.
+    private func emitLevel(from buffer: AVAudioPCMBuffer) {
+        guard let onLevel = onLevel,
+              let channel = buffer.floatChannelData?[0] else { return }
+        let count = Int(buffer.frameLength)
+        guard count > 0 else { return }
+        var sum: Float = 0
+        for i in 0..<count { let s = channel[i]; sum += s * s }
+        let rms = (sum / Float(count)).squareRoot()
+        let db = 20 * log10(max(rms, 1e-7))
+        let level = max(0, min(1, (db + 50) / 50))
+        DispatchQueue.main.async { onLevel(level) }
     }
 
     func stop(_ completion: @escaping (URL?, TimeInterval) -> Void) {

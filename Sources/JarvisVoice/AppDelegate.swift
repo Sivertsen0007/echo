@@ -1,10 +1,8 @@
 import Cocoa
 
-/// State machine:
-///   idle  -- single Fn tap --> armed (400ms window)
-///   armed -- second Fn tap --> recording
-///   armed -- timeout       --> idle
-///   recording -- Fn tap    --> processing -> idle
+/// Hold-to-talk state machine:
+///   idle      -- hotkey down --> recording (records while held)
+///   recording -- hotkey up   --> processing -> idle
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var hotkey: HotkeyMonitor!
@@ -12,10 +10,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var transcriber: Transcriber!
     private var injector: TextInjector!
 
-    private enum State { case idle, armed, recording, processing }
+    private enum State { case idle, recording, processing }
     private var state: State = .idle
-    private var armedTimer: DispatchWorkItem?
-    private let doubleTapWindow: TimeInterval = 0.45
 
     private lazy var menubarIcon: NSImage? = {
         guard let path = Bundle.main.path(forResource: "menubar-icon", ofType: "png"),
@@ -65,10 +61,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         _ = Database.shared   // force-create db.sqlite + run migrations on startup
         _ = PostProcessor.shared // discover claude CLI path on startup
         recorder = AudioRecorder()
+        recorder.onLevel = { level in RecordingOverlay.shared.updateLevel(level) }
         transcriber = Transcriber()
         injector = TextInjector()
 
-        hotkey = HotkeyMonitor(onTap: { [weak self] in self?.handleTap() })
+        hotkey = HotkeyMonitor(
+            onPress: { [weak self] in self?.handlePress() },
+            onRelease: { [weak self] in self?.handleRelease() })
         if let saved = UserDefaults.standard.string(forKey: "echo.hotkey"),
            let opt = HotkeyOption(rawValue: saved) {
             hotkey.hotkey = opt
@@ -86,28 +85,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         OnboardingController.shared.showIfNeeded()
     }
 
-    private func handleTap() {
-        switch state {
-        case .idle:
-            state = .armed
-            let work = DispatchWorkItem { [weak self] in
-                guard let self = self, self.state == .armed else { return }
-                self.state = .idle
-            }
-            armedTimer = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + doubleTapWindow, execute: work)
+    /// Hotkey pressed: start recording if we are idle. Presses during
+    /// processing are ignored so a fresh recording can't stomp an in-flight one.
+    private func handlePress() {
+        guard state == .idle else { return }
+        startRecording()
+    }
 
-        case .armed:
-            armedTimer?.cancel()
-            armedTimer = nil
-            startRecording()
-
-        case .recording:
-            stopRecording()
-
-        case .processing:
-            break // ignore taps while we are waiting on OpenAI
-        }
+    /// Hotkey released: stop the recording we started on press.
+    private func handleRelease() {
+        guard state == .recording else { return }
+        stopRecording()
     }
 
     private func startRecording() {
@@ -360,6 +348,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func setIdle() {
         stopPulsing()
+        RecordingOverlay.shared.hide()
         statusItem.button?.image = menubarIcon
         statusItem.button?.contentTintColor = nil
         if let t = TransformsStore.shared.nextRecordingOverride {
@@ -370,6 +359,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func setRecording() {
+        RecordingOverlay.shared.showListening()
         statusItem.button?.image = menubarIcon
         statusItem.button?.contentTintColor = .systemRed
         recordingStartedAt = Date()
@@ -385,6 +375,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func setProcessing() {
         stopPulsing()
+        RecordingOverlay.shared.showProcessing()
         recordingTimer?.invalidate(); recordingTimer = nil
         recordingStartedAt = nil
         statusItem.button?.image = menubarIcon

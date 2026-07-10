@@ -4,8 +4,8 @@ import CoreGraphics
 /// Modifier-only push-to-talk hotkeys.
 ///
 /// Each option is identified by a stable string id so it can persist to
-/// UserDefaults. The host (AppDelegate) decides what taps mean (double-tap =
-/// start, single = stop).
+/// UserDefaults. The host (AppDelegate) records while the key is held down and
+/// stops on release (hold-to-talk, Wispr Flow style).
 enum HotkeyOption: String, CaseIterable, Identifiable {
     case fn
     case rightOption
@@ -42,21 +42,21 @@ enum HotkeyOption: String, CaseIterable, Identifiable {
     }
 }
 
-/// Detects single taps of the selected modifier key (down + up within 600ms).
-/// The host receives one `onTap` callback per release.
+/// Hold-to-talk: reports when the selected modifier key goes down and when it
+/// comes back up, so the host can record for exactly as long as it is held.
 final class HotkeyMonitor {
-    private let onTap: () -> Void
+    private let onPress: () -> Void
+    private let onRelease: () -> Void
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var keyDown = false
-    private var pressedAt: Date?
-    private let tapMaxDuration: TimeInterval = 0.6
 
     /// Read/write so it can be changed at runtime without recreating the tap.
     var hotkey: HotkeyOption = .fn
 
-    init(onTap: @escaping () -> Void) {
-        self.onTap = onTap
+    init(onPress: @escaping () -> Void, onRelease: @escaping () -> Void) {
+        self.onPress = onPress
+        self.onRelease = onRelease
     }
 
     func start() {
@@ -93,14 +93,10 @@ final class HotkeyMonitor {
         let isDown = hotkey.isDown(event.flags)
         if isDown && !keyDown {
             keyDown = true
-            pressedAt = Date()
+            DispatchQueue.main.async { self.onPress() }
         } else if !isDown && keyDown {
             keyDown = false
-            let held = pressedAt.map { Date().timeIntervalSince($0) } ?? 0
-            pressedAt = nil
-            if held <= tapMaxDuration {
-                DispatchQueue.main.async { self.onTap() }
-            }
+            DispatchQueue.main.async { self.onRelease() }
         }
     }
 }
