@@ -108,6 +108,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.recorder.prewarm()
         }
 
+        // Make sure Echo comes back after a reboot. Registered once; if the
+        // user later turns the login item off in Settings we respect that.
+        if !UserDefaults.standard.bool(forKey: "echo.loginItemAutoregistered") {
+            UserDefaults.standard.set(true, forKey: "echo.loginItemAutoregistered")
+            if !LoginItem.isEnabled {
+                do {
+                    try LoginItem.setEnabled(true)
+                    NSLog("Registered Echo as a login item")
+                } catch {
+                    NSLog("Could not register login item: \(error)")
+                }
+            }
+        }
+
         // Show onboarding on first run only.
         OnboardingController.shared.showIfNeeded()
     }

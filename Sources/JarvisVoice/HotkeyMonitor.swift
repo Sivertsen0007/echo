@@ -1,5 +1,6 @@
 import Cocoa
 import CoreGraphics
+import IOKit.hid
 
 /// Modifier-only push-to-talk hotkeys.
 ///
@@ -61,6 +62,18 @@ final class HotkeyMonitor {
     }
 
     func start() {
+        // Listen-only keyboard taps need Input Monitoring on modern macOS -
+        // Accessibility alone is not enough. Without it the tap is created
+        // but silently never enables, so surface both states explicitly and
+        // trigger the system prompt when the grant is missing.
+        let axTrusted = AXIsProcessTrusted()
+        let listenAccess = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)
+        NSLog("Permissions: Accessibility=\(axTrusted), InputMonitoring=\(accessName(listenAccess))")
+        if listenAccess != kIOHIDAccessTypeGranted {
+            NSLog("Requesting Input Monitoring access (System Settings > Privacy & Security > Input Monitoring)")
+            IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
+        }
+
         let mask = (1 << CGEventType.flagsChanged.rawValue)
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
 
@@ -95,7 +108,7 @@ final class HotkeyMonitor {
         runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
-        NSLog("HotkeyMonitor started (\(hotkey.displayName) tap detection)")
+        NSLog("HotkeyMonitor started (\(hotkey.displayName) tap detection), tap enabled: \(CGEvent.tapIsEnabled(tap: tap))")
 
         // Belt-and-braces: some disable paths deliver no tapDisabled event to
         // the callback, so also poll and self-heal on a slow timer.
@@ -126,6 +139,14 @@ final class HotkeyMonitor {
         CGEvent.tapEnable(tap: tap, enable: true)
         keyDown = false
         NSLog("Event tap disabled by system - re-enabled")
+    }
+
+    private func accessName(_ access: IOHIDAccessType) -> String {
+        switch access {
+        case kIOHIDAccessTypeGranted: return "granted"
+        case kIOHIDAccessTypeDenied: return "DENIED"
+        default: return "unknown (not asked yet)"
+        }
     }
 
     private func handleFlagsChanged(_ event: CGEvent) {

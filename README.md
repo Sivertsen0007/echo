@@ -21,12 +21,16 @@ transforms, statistik og onboarding. Se "Arkitektur" for hvad der er bygget.
 
 ## Setup
 
-1. Installer (bygger, signerer, installerer til `/Applications`, starter under launchd):
+1. Installer (bygger, signerer, installerer til `/Applications` og starter appen):
    ```bash
    ./install.sh
    ```
-   launchd starter Echo ved login og genstarter den automatisk efter et crash
-   (et normalt Quit respekteres). Kun til udvikling: `./build.sh` + `open build/JarvisVoice.app`.
+   Echo registrerer sig selv som login item (SMAppService) første gang den kører.
+   Kun til udvikling: `./build.sh` + `open build/JarvisVoice.app`.
+
+   **Aldrig launchd:** på macOS 26 får en launchd-exec'et proces sit event-tap
+   auto-DENIED af TCC (Input Monitoring), hvilket dræber hotkeyen tavst. Rettes
+   med `tccutil reset ListenEvent com.mathiassivertsen.jarvisvoice` + genstart.
 
 2. Log: alt appen logger ender i `~/.jarvis-voice/logs/echo.log` (roteres ved 2 MB).
    Fejlede dikteringers lyd gemmes i `~/.jarvis-voice/failed/` (nyeste 10) i stedet
@@ -36,6 +40,8 @@ transforms, statistik og onboarding. Se "Arkitektur" for hvad der er bygget.
    - **Mikrofon** - sig ja.
    - **Accessibility** (System Settings > Privacy & Security > Accessibility) - tilføj
      appen. Nødvendigt for både global hotkey og tekst-injektion. Genstart appen bagefter.
+   - **Input Monitoring** - kræves separat for hotkey-tap'et på nyere macOS. Appen
+     beder selv om det ved opstart og logger begge tilladelsers status.
    - **Provider + API-nøgle** - vælg OpenAI eller Groq og indsæt din nøgle.
 
 Nøgler og data ligger i `~/.jarvis-voice/` (`config.json`, `db.sqlite`, samt JSON-backup
@@ -101,7 +107,10 @@ af vocab/snippets/transforms/style). Nøgler kan også sættes via env `OPENAI_A
 - **Pre-warmet audio-engine**: engine bygges før tastetryk, så første ord ikke klippes.
 - **Max-optagelse**: 5 min auto-stop dækker mistede release-events.
 - **Sleep/wake**: tap og engine revalideres ved wake.
-- **launchd**: crash -> automatisk genstart; anden instans afviser selv at starte.
+- **Permission-diagnostik**: Accessibility- og Input Monitoring-status logges ved
+  opstart sammen med tap'ets faktiske enabled-tilstand.
+- **Login item + single-instance guard**: starter ved login; anden instans afviser
+  selv at starte.
 
 ## Mulige næste skridt
 
