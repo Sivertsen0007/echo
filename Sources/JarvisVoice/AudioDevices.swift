@@ -61,6 +61,12 @@ enum AudioDevices {
         stringProperty(id, kAudioObjectPropertyName)
     }
 
+    /// The persistable CoreAudio UID for a device id. Also matches
+    /// AVCaptureDevice.uniqueID for the same device on macOS.
+    static func uid(for id: AudioDeviceID) -> String? {
+        stringProperty(id, kAudioDevicePropertyDeviceUID)
+    }
+
     /// True for Bluetooth (classic or LE) devices. Recording from one forces
     /// the headset out of A2DP into HFP, degrading its output to call quality.
     static func isBluetooth(_ id: AudioDeviceID) -> Bool {
