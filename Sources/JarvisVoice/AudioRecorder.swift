@@ -143,12 +143,24 @@ final class AudioRecorder {
     }
 
     /// The device the user wants right now: their pinned choice if it is
-    /// present, else the system default input.
+    /// present, else the system default input - EXCEPT that "follow default"
+    /// never resolves to a Bluetooth mic. Opening a Bluetooth mic forces the
+    /// headset from A2DP (music quality) into HFP (call quality), so music
+    /// degrades and the headset "changes sound" the moment recording starts.
+    /// macOS makes a connected headset the default input, so without this
+    /// guard every dictation would trigger that switch. Users who truly want
+    /// the headset mic can still pin it explicitly in Settings.
     private func desiredInputDevice() -> AudioDeviceID? {
-        if let uid = ConfigStore.shared.inputDeviceUID {
-            return AudioDevices.device(forUID: uid) ?? AudioDevices.defaultInputDevice()
+        if let uid = ConfigStore.shared.inputDeviceUID,
+           let pinned = AudioDevices.device(forUID: uid) {
+            return pinned
         }
-        return AudioDevices.defaultInputDevice()
+        guard let def = AudioDevices.defaultInputDevice() else { return nil }
+        if AudioDevices.isBluetooth(def), let builtIn = AudioDevices.builtInInputDevice() {
+            NSLog("Default input is Bluetooth (\(AudioDevices.name(for: def) ?? "?")) - using built-in mic so the headset stays in music mode")
+            return builtIn
+        }
+        return def
     }
 
     /// The device an engine's input node is currently bound to.

@@ -1111,10 +1111,13 @@ struct SettingsView: View {
                         set: { config.setInputDeviceUID($0.isEmpty ? nil : $0) }
                     )) {
                         Text("System Default").tag("")
-                        ForEach(inputDevices) { d in Text(d.name).tag(d.uid) }
+                        ForEach(inputDevices) { d in
+                            Text(d.isBluetooth ? "\(d.name)  -  switches headset to call mode, degrades music" : d.name)
+                                .tag(d.uid)
+                        }
                     }
                     .pickerStyle(.menu).labelsHidden()
-                    Text("Which mic Echo records from. System Default follows your Mac's input setting; pick your built-in mic here to use it regardless of connected AirPods/headsets.")
+                    Text("Which mic Echo records from. System Default is headset-safe: when a Bluetooth headset is the Mac's input, Echo records from the built-in mic instead, so the headset stays in full music quality while you dictate. Only pick a Bluetooth mic explicitly if you accept the call-mode switch.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 .padding(16)
