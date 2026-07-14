@@ -11,14 +11,16 @@ import SwiftUI
 final class RecordingOverlay {
     static let shared = RecordingOverlay()
 
-    enum Phase { case listening, processing }
+    enum Phase: Equatable { case listening, processing, error(String) }
 
     private let model = OverlayModel()
     private var panel: NSPanel?
+    private var autoHide: DispatchWorkItem?
 
     private init() {}
 
     func showListening() {
+        autoHide?.cancel()
         ensurePanel()
         model.reset()
         model.phase = .listening
@@ -32,13 +34,28 @@ final class RecordingOverlay {
     }
 
     func showProcessing() {
+        autoHide?.cancel()
         ensurePanel()
         model.phase = .processing
         reposition()
         panel?.orderFrontRegardless()
     }
 
+    /// Brief error pill ("No speech detected", "Network error") that hides
+    /// itself. Failures used to be invisible - the overlay just vanished.
+    func showError(_ message: String) {
+        autoHide?.cancel()
+        ensurePanel()
+        model.phase = .error(message)
+        reposition()
+        panel?.orderFrontRegardless()
+        let work = DispatchWorkItem { [weak self] in self?.hide() }
+        autoHide = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5, execute: work)
+    }
+
     func hide() {
+        autoHide?.cancel()
         panel?.orderOut(nil)
     }
 
@@ -118,6 +135,15 @@ private struct OverlayView: View {
                 Text("Transcribing")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
+            case .error(let message):
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.yellow)
+                Text(message)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
             }
         }
         .padding(.horizontal, 16)

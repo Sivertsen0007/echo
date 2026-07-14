@@ -8,21 +8,34 @@ import Cocoa
 /// fine at 16 kHz, and the smaller file uploads roughly 3x faster than native
 /// 48 kHz - which is the round-trip latency the user feels on every dictation.
 ///
-/// A fresh AVAudioEngine is built for each recording so device changes are
-/// honoured: without this the engine stays pinned to whatever input device was
-/// default when the app launched (e.g. AirPods), ignoring later switches.
+/// An engine is prewarmed ahead of each recording (at launch, after every
+/// stop, on wake, and on audio-configuration changes) so start() only has to
+/// call engine.start(). Building the engine lazily on key-down cost
+/// ~100-200ms and clipped the first word of short dictations. start() still
+/// verifies the prewarmed engine points at the currently desired input device
+/// and rebuilds when it doesn't, so device switches are honoured.
 final class AudioRecorder {
     private var engine = AVAudioEngine()
+    private var prepared: AVAudioEngine?
     private var audioFile: AVAudioFile?
     private var outputURL: URL?
     private var startedAt: Date?
     private let targetSampleRate: Double = 16000
     private var converter: AVAudioConverter?
     private var targetFormat: AVAudioFormat?
+    private(set) var isRecording = false
+    /// Loudest level (0...1) seen during the current recording. Lets the host
+    /// skip uploading silence, which the API would only hallucinate on.
+    private var peakLevel: Float = 0
 
     /// Called on the main queue with a normalised input level (0...1) per audio
     /// buffer, for driving a live waveform. Set by the host.
     var onLevel: ((Float) -> Void)?
+
+    // Note: no AVAudioEngineConfigurationChange observer here on purpose -
+    // configuring a prewarmed engine fires that notification itself, so
+    // rebuilding on it loops forever. Device changes are handled instead by
+    // the device-match check in start() (and the wake-time prewarm).
 
     func requestPermission(_ completion: @escaping (Bool) -> Void) {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
@@ -35,11 +48,33 @@ final class AudioRecorder {
         }
     }
 
-    func start() {
-        // Fresh engine each time so it picks up the current input device.
-        engine = AVAudioEngine()
+    /// Build and prepare the next engine ahead of time, off the hot path.
+    func prewarm() {
+        guard !isRecording else { return }
+        let e = AVAudioEngine()
+        selectInputDevice(on: e.inputNode)
+        _ = e.inputNode.outputFormat(forBus: 0) // force the IO unit to configure
+        e.prepare()
+        prepared = e
+    }
+
+    /// Returns false when recording could not start (no usable input device,
+    /// file error, engine failure) so the host can show an error instead of
+    /// pretending to listen.
+    @discardableResult
+    func start() -> Bool {
+        // Use the prewarmed engine when its input still matches the desired
+        // device; otherwise build fresh (the device changed since prewarm).
+        let desired = desiredInputDevice()
+        if let pre = prepared, currentDevice(of: pre.inputNode) == desired {
+            engine = pre
+        } else {
+            engine = AVAudioEngine()
+            selectInputDevice(on: engine.inputNode)
+        }
+        prepared = nil
+
         let inputNode = engine.inputNode
-        selectInputDevice(on: inputNode)
         let inputFormat = inputNode.outputFormat(forBus: 0)
 
         // Target: 16 kHz mono float32 processing format. The converter handles
@@ -50,7 +85,7 @@ final class AudioRecorder {
                                          interleaved: false),
               let converter = AVAudioConverter(from: inputFormat, to: target) else {
             NSLog("Failed to build 16 kHz converter from input format \(inputFormat)")
-            return
+            return false
         }
         targetFormat = target
         self.converter = converter
@@ -75,7 +110,8 @@ final class AudioRecorder {
                                         commonFormat: .pcmFormatFloat32, interleaved: false)
         } catch {
             NSLog("Failed to open audio file: \(error)")
-            return
+            cleanupAfterFailedStart()
+            return false
         }
 
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
@@ -86,23 +122,52 @@ final class AudioRecorder {
             engine.prepare()
             try engine.start()
             startedAt = Date()
+            peakLevel = 0
+            isRecording = true
             NSLog("Recording to \(url.lastPathComponent) at \(Int(targetSampleRate)) Hz (input \(Int(inputFormat.sampleRate)) Hz)")
+            return true
         } catch {
             NSLog("Engine start failed: \(error)")
+            inputNode.removeTap(onBus: 0)
+            cleanupAfterFailedStart()
+            return false
         }
+    }
+
+    private func cleanupAfterFailedStart() {
+        audioFile = nil
+        converter = nil
+        targetFormat = nil
+        if let url = outputURL { try? FileManager.default.removeItem(at: url) }
+        outputURL = nil
+    }
+
+    /// The device the user wants right now: their pinned choice if it is
+    /// present, else the system default input.
+    private func desiredInputDevice() -> AudioDeviceID? {
+        if let uid = ConfigStore.shared.inputDeviceUID {
+            return AudioDevices.device(forUID: uid) ?? AudioDevices.defaultInputDevice()
+        }
+        return AudioDevices.defaultInputDevice()
+    }
+
+    /// The device an engine's input node is currently bound to.
+    private func currentDevice(of node: AVAudioInputNode) -> AudioDeviceID? {
+        guard let unit = node.audioUnit else { return nil }
+        var id = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let status = AudioUnitGetProperty(unit,
+                                          kAudioOutputUnitProperty_CurrentDevice,
+                                          kAudioUnitScope_Global, 0,
+                                          &id, &size)
+        return status == noErr ? id : nil
     }
 
     /// Point the engine's input node at the user's chosen mic, or the current
     /// system default when none is chosen / the chosen one is unplugged. Must
     /// run before we read the input format or install the tap.
     private func selectInputDevice(on node: AVAudioInputNode) {
-        let deviceID: AudioDeviceID?
-        if let uid = ConfigStore.shared.inputDeviceUID {
-            deviceID = AudioDevices.device(forUID: uid) ?? AudioDevices.defaultInputDevice()
-        } else {
-            deviceID = AudioDevices.defaultInputDevice()
-        }
-        guard let dev = deviceID, let unit = node.audioUnit else { return }
+        guard let dev = desiredInputDevice(), let unit = node.audioUnit else { return }
         var id = dev
         let status = AudioUnitSetProperty(unit,
                                           kAudioOutputUnitProperty_CurrentDevice,
@@ -111,7 +176,7 @@ final class AudioRecorder {
         if status != noErr {
             NSLog("Could not set input device (\(status)); using engine default")
         } else {
-            NSLog("Recording from input device: \(AudioDevices.name(for: dev) ?? "id \(dev)")")
+            NSLog("Input device: \(AudioDevices.name(for: dev) ?? "id \(dev)")")
         }
     }
 
@@ -157,8 +222,7 @@ final class AudioRecorder {
     /// RMS of the buffer mapped to a 0...1 level (roughly -50 dB..0 dB) for the
     /// waveform. Cheap enough to run per buffer on the audio thread.
     private func emitLevel(from buffer: AVAudioPCMBuffer) {
-        guard let onLevel = onLevel,
-              let channel = buffer.floatChannelData?[0] else { return }
+        guard let channel = buffer.floatChannelData?[0] else { return }
         let count = Int(buffer.frameLength)
         guard count > 0 else { return }
         var sum: Float = 0
@@ -166,14 +230,21 @@ final class AudioRecorder {
         let rms = (sum / Float(count)).squareRoot()
         let db = 20 * log10(max(rms, 1e-7))
         let level = max(0, min(1, (db + 50) / 50))
-        DispatchQueue.main.async { onLevel(level) }
+        if level > peakLevel { peakLevel = level }
+        if let onLevel = onLevel {
+            DispatchQueue.main.async { onLevel(level) }
+        }
     }
 
-    func stop(_ completion: @escaping (URL?, TimeInterval) -> Void) {
+    /// Completion receives the file URL, the recorded duration, and the peak
+    /// input level (0...1) so the caller can gate out silent recordings.
+    func stop(_ completion: @escaping (URL?, TimeInterval, Float) -> Void) {
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
+        isRecording = false
         let duration = startedAt.map { Date().timeIntervalSince($0) } ?? 0
         let url = outputURL
+        let peak = peakLevel
 
         // Nil the file first so AVAudioFile flushes and closes before we stat it.
         audioFile = nil
@@ -184,9 +255,12 @@ final class AudioRecorder {
 
         if let url = url,
            let size = try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int {
-            NSLog("Recorded \(String(format: "%.1f", Double(size) / 1024))KB over \(String(format: "%.1f", duration))s")
+            NSLog("Recorded \(String(format: "%.1f", Double(size) / 1024))KB over \(String(format: "%.1f", duration))s (peak \(String(format: "%.2f", peak)))")
         }
 
-        completion(url, duration)
+        completion(url, duration, peak)
+
+        // Prepare the next engine now, off the hot path of the next key-down.
+        DispatchQueue.main.async { [weak self] in self?.prewarm() }
     }
 }

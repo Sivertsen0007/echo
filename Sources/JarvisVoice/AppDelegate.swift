@@ -25,6 +25,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var pulseOn = false
     private var recordingTimer: Timer?
     private var recordingStartedAt: Date?
+    private var maxRecordingTimer: Timer?
+    private var processingWatchdog: DispatchWorkItem?
+
+    /// Hard cap on one dictation. Also the recovery path when the hotkey
+    /// release event is lost (tap disabled mid-hold): without it the app
+    /// would record forever.
+    private let maxRecordingSeconds: TimeInterval = 300
+    /// Absolute ceiling on the processing phase. The network layer has its
+    /// own timeouts; this is the safety net that guarantees the app always
+    /// returns to idle and accepts the next dictation.
+    private let processingWatchdogSeconds: TimeInterval = 60
+    private let minRecordingSeconds: TimeInterval = 0.3
+    /// Peak level (0...1, ~-50dB..0dB) a recording must reach to be treated
+    /// as speech. 0.1 = -45 dB: safely below any real speech, above room hum.
+    private let silencePeakThreshold: Float = 0.1
 
     private func startPulsing() {
         stopPulsing()
@@ -79,7 +94,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         recorder.requestPermission { granted in
             if !granted { NSLog("Microphone permission denied") }
         }
+        recorder.prewarm()
         TextInjector.ensureAccessibilityPermission()
+
+        // Re-validate the pieces that die across sleep/wake: the event tap
+        // can come back disabled, and the prewarmed engine may point at a
+        // device that vanished while the lid was closed.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            NSLog("System woke - revalidating hotkey tap and audio engine")
+            self?.hotkey.ensureEnabled()
+            self?.recorder.prewarm()
+        }
 
         // Show onboarding on first run only.
         OnboardingController.shared.showIfNeeded()
@@ -99,33 +126,94 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func startRecording() {
+        guard recorder.start() else {
+            showTransientError("Microphone unavailable")
+            return
+        }
         state = .recording
         setRecording()
         AudioFeedback.playStart()
-        recorder.start()
+
+        maxRecordingTimer?.invalidate()
+        maxRecordingTimer = Timer.scheduledTimer(withTimeInterval: maxRecordingSeconds,
+                                                 repeats: false) { [weak self] _ in
+            guard let self = self, self.state == .recording else { return }
+            NSLog("Max recording duration reached - auto-stopping")
+            self.hotkey.resetKeyState()
+            self.stopRecording()
+        }
+    }
+
+    /// Every failure funnels through here: audible cue, a short-lived overlay
+    /// message, then back to idle so the next dictation can start.
+    private func showTransientError(_ message: String) {
+        processingWatchdog?.cancel()
+        maxRecordingTimer?.invalidate(); maxRecordingTimer = nil
+        AudioFeedback.playError()
+        state = .idle
+        setIdle()
+        RecordingOverlay.shared.showError(message)
+        NSLog("Dictation failed: \(message)")
+    }
+
+    private static func errorMessage(for failure: Transcriber.Failure?) -> String {
+        switch failure {
+        case .noKey: return "No API key - open Echo settings"
+        case .badKey: return "API key rejected"
+        case .rateLimited: return "Rate limited - try again"
+        case .serverError(let code): return "Provider error (\(code))"
+        case .network: return "Network error - recording kept"
+        case .empty, nil: return "No speech detected"
+        }
     }
 
     private func stopRecording() {
         state = .processing
         setProcessing()
         AudioFeedback.playStop()
+        maxRecordingTimer?.invalidate(); maxRecordingTimer = nil
+
+        // Watchdog: whatever goes wrong below (hung request, bug in a
+        // completion chain), the app must come back to idle.
+        processingWatchdog?.cancel()
+        let watchdog = DispatchWorkItem { [weak self] in
+            guard let self = self, self.state == .processing else { return }
+            NSLog("Processing watchdog fired - forcing back to idle")
+            self.showTransientError("Timed out - try again")
+        }
+        processingWatchdog = watchdog
+        DispatchQueue.main.asyncAfter(deadline: .now() + processingWatchdogSeconds,
+                                      execute: watchdog)
+
         // Capture the focused app NOW, before we steal focus with the alert /
         // before injection ambiguity.
         let focused = NSWorkspace.shared.frontmostApplication
         let appBundle = focused?.bundleIdentifier
         let appName = focused?.localizedName
 
-        recorder.stop { [weak self] url, duration in
+        recorder.stop { [weak self] url, duration, peak in
             guard let self = self else { return }
-            guard let url = url, duration >= 0.5 else {
+            guard let url = url, duration >= self.minRecordingSeconds else {
                 if let url = url { try? FileManager.default.removeItem(at: url) }
                 NSLog("Discarded short recording (\(duration)s)")
                 Database.shared.logTranscription(
                     rawText: "", finalText: "", audioDuration: duration, latency: 0,
                     appBundleId: appBundle, appName: appName, discarded: true)
                 DispatchQueue.main.async {
-                    self.state = .idle
-                    self.setIdle()
+                    self.showTransientError("Too short - hold while speaking")
+                }
+                return
+            }
+            // Silence gate: audio that never rose above the noise floor would
+            // only make the API hallucinate or echo the vocab prompt back.
+            guard peak >= self.silencePeakThreshold else {
+                try? FileManager.default.removeItem(at: url)
+                NSLog("Discarded silent recording (peak \(peak))")
+                Database.shared.logTranscription(
+                    rawText: "", finalText: "", audioDuration: duration, latency: 0,
+                    appBundleId: appBundle, appName: appName, discarded: true)
+                DispatchQueue.main.async {
+                    self.showTransientError("No speech detected")
                 }
                 return
             }
@@ -137,16 +225,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let modelId = result.model
                 guard !raw.isEmpty else {
                     DispatchQueue.main.async {
-                        // Transcription failed or came back empty - give an
-                        // audible cue instead of failing silently.
-                        AudioFeedback.playError()
                         Database.shared.logTranscription(
                             rawText: "", finalText: "", audioDuration: duration,
                             latency: latency, appBundleId: appBundle, appName: appName,
                             styleUsed: nil, stylePromptChars: 0,
                             provider: providerId, model: modelId, discarded: true)
-                        self.state = .idle
-                        self.setIdle()
+                        self.showTransientError(Self.errorMessage(for: result.failure))
                     }
                     return
                 }
@@ -163,10 +247,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 PostProcessor.shared.apply(style: stylePreset, to: raw) { styled in
                     let withVocab = VocabStore.shared.applyReplacements(styled, currentAppBundleId: appBundle)
                     let corrected = SnippetsStore.shared.apply(to: withVocab)
-                    if !corrected.isEmpty {
-                        self.injector.insert(corrected)
-                        CorrectionDetector.shared.observeAfterInjection(corrected)
-                    }
                     Database.shared.logTranscription(
                         rawText: raw, finalText: corrected, audioDuration: duration,
                         latency: latency, appBundleId: appBundle, appName: appName,
@@ -174,6 +254,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         stylePromptChars: stylePreset.systemPrompt.count,
                         provider: providerId, model: modelId,
                         discarded: corrected.isEmpty)
+                    guard !corrected.isEmpty else {
+                        self.showTransientError("Nothing to insert")
+                        return
+                    }
+                    self.injector.insert(corrected)
+                    CorrectionDetector.shared.observeAfterInjection(corrected)
+                    self.processingWatchdog?.cancel()
                     self.state = .idle
                     self.setIdle()
                 }
@@ -216,7 +303,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         openMain.target = self
         menu.addItem(openMain)
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Double-tap Fn = start    Single Fn = stop", action: nil, keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Hold hotkey to record - release to insert", action: nil, keyEquivalent: ""))
         let transformsItem = NSMenuItem(title: "Use for next recording", action: nil, keyEquivalent: "")
         let transformsSub = NSMenu()
         transformsSub.delegate = self

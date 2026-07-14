@@ -49,6 +49,7 @@ final class HotkeyMonitor {
     private let onRelease: () -> Void
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+    private var healthTimer: Timer?
     private var keyDown = false
 
     /// Read/write so it can be changed at runtime without recreating the tap.
@@ -71,8 +72,16 @@ final class HotkeyMonitor {
             callback: { _, type, event, userInfo in
                 guard let userInfo = userInfo else { return Unmanaged.passUnretained(event) }
                 let monitor = Unmanaged<HotkeyMonitor>.fromOpaque(userInfo).takeUnretainedValue()
-                if type == .flagsChanged {
+                switch type {
+                case .tapDisabledByTimeout, .tapDisabledByUserInput:
+                    // The system disables taps it considers slow (and after
+                    // some sleep/wake cycles). Without re-enabling here the
+                    // hotkey dies silently until the app is restarted.
+                    monitor.reenableTap()
+                case .flagsChanged:
                     monitor.handleFlagsChanged(event)
+                default:
+                    break
                 }
                 return Unmanaged.passUnretained(event)
             },
@@ -87,6 +96,36 @@ final class HotkeyMonitor {
         CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
         NSLog("HotkeyMonitor started (\(hotkey.displayName) tap detection)")
+
+        // Belt-and-braces: some disable paths deliver no tapDisabled event to
+        // the callback, so also poll and self-heal on a slow timer.
+        healthTimer?.invalidate()
+        healthTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            self?.ensureEnabled()
+        }
+    }
+
+    /// Re-enable the tap if the system has disabled it. Safe to call any time.
+    func ensureEnabled() {
+        guard let tap = eventTap else { return }
+        if !CGEvent.tapIsEnabled(tap: tap) {
+            CGEvent.tapEnable(tap: tap, enable: true)
+            keyDown = false
+            NSLog("Event tap was disabled - re-enabled by health check")
+        }
+    }
+
+    /// Force the held-state back to "up" (e.g. after an auto-stopped
+    /// recording) so a missed release event cannot desync press/release.
+    func resetKeyState() {
+        keyDown = false
+    }
+
+    private func reenableTap() {
+        guard let tap = eventTap else { return }
+        CGEvent.tapEnable(tap: tap, enable: true)
+        keyDown = false
+        NSLog("Event tap disabled by system - re-enabled")
     }
 
     private func handleFlagsChanged(_ event: CGEvent) {

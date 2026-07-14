@@ -21,19 +21,16 @@ transforms, statistik og onboarding. Se "Arkitektur" for hvad der er bygget.
 
 ## Setup
 
-1. Byg:
+1. Installer (bygger, signerer, installerer til `/Applications`, starter under launchd):
    ```bash
-   ./build.sh
+   ./install.sh
    ```
+   launchd starter Echo ved login og genstarter den automatisk efter et crash
+   (et normalt Quit respekteres). Kun til udvikling: `./build.sh` + `open build/JarvisVoice.app`.
 
-2. Kør:
-   ```bash
-   open build/JarvisVoice.app
-   ```
-   Eller for console-output:
-   ```bash
-   ./build/JarvisVoice.app/Contents/MacOS/JarvisVoice
-   ```
+2. Log: alt appen logger ender i `~/.jarvis-voice/logs/echo.log` (roteres ved 2 MB).
+   Fejlede dikteringers lyd gemmes i `~/.jarvis-voice/failed/` (nyeste 10) i stedet
+   for at blive slettet.
 
 3. Første gang guider onboarding dig gennem:
    - **Mikrofon** - sig ja.
@@ -47,7 +44,7 @@ af vocab/snippets/transforms/style). Nøgler kan også sættes via env `OPENAI_A
 
 ## Brug
 
-- **Double-tap** modifieren for at starte, **single-tap** for at stoppe. Default-modifier
+- **Hold** modifieren nede, tal, **slip** - hold-to-talk. Default-modifier
   er Fn/Globe; kan skiftes i Settings (Fn, højre ⌥, højre ⌘, højre ⇧).
 - Menubar-ikonet skifter tilstand: idle -> recording -> processing -> idle.
 - Teksten indsættes hvor markøren stod da du stoppede.
@@ -58,7 +55,8 @@ af vocab/snippets/transforms/style). Nøgler kan også sættes via env `OPENAI_A
 
 | Fil | Ansvar |
 |---|---|
-| `main.swift` | NSApplication bootstrap, `.accessory`-policy (ingen Dock) |
+| `main.swift` | NSApplication bootstrap, `.accessory`-policy, single-instance guard |
+| `LogFile.swift` | Persistent fil-log (`~/.jarvis-voice/logs/echo.log`, rotation ved 2 MB) |
 | `AppDelegate.swift` | Menubar status item, state machine, hele record->transcribe->post-process->inject->log-kæden |
 | `HotkeyMonitor.swift` | `CGEventTap` på flagsChanged; modifier-only push-to-talk med device-bit-check |
 | `AudioRecorder.swift` | `AVAudioEngine`-tap -> WAV i temp-mappe |
@@ -87,6 +85,23 @@ af vocab/snippets/transforms/style). Nøgler kan også sættes via env `OPENAI_A
 3. Vocab-replacements (global + per-app)
 4. Snippet-udvidelser
 5. Indsæt -> `CorrectionDetector` lytter efter efterredigeringer og tilbyder at lære nye rettelser
+
+## Stabilitet (indbygget selvhelbredelse)
+
+- **Event-tap**: genaktiveres straks ved `tapDisabledByTimeout`/`ByUserInput` og
+  af en 30s health-check-timer - hotkeyen kan ikke længere dø permanent.
+- **Watchdog**: processing-fasen har et 60s-loft; appen vender altid tilbage til idle.
+- **Synlige fejl**: overlay viser årsagen ("No speech detected", "Network error",
+  "API key rejected", ...) i stedet for at forsvinde tavst.
+- **Stilheds-gate**: optagelser der aldrig kommer over støjgulvet uploades ikke
+  (Whisper ekkoer ellers vokabular-prompten tilbage). Fuzzy ekko-detektion fanger
+  delvise ekkoer.
+- **Retry + bevaret lyd**: netværks-/serverfejl prøves igen én gang; fejler det
+  endeligt, flyttes lydfilen til `~/.jarvis-voice/failed/` i stedet for at slettes.
+- **Pre-warmet audio-engine**: engine bygges før tastetryk, så første ord ikke klippes.
+- **Max-optagelse**: 5 min auto-stop dækker mistede release-events.
+- **Sleep/wake**: tap og engine revalideres ved wake.
+- **launchd**: crash -> automatisk genstart; anden instans afviser selv at starte.
 
 ## Mulige næste skridt
 
