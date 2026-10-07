@@ -7,6 +7,13 @@ struct StylePreset: Identifiable, Hashable {
     let name: String
     let description: String
     let systemPrompt: String
+    /// True for styles that only tidy the speaker's own words (Clean). Lets the
+    /// post-processor reject output that is mostly invented text - a sign the
+    /// model answered or expanded instead of cleaning. Left false for styles
+    /// that legitimately rewrite or restructure (Email, Bullets) and for British
+    /// (its spelling swaps read as "new" words to a token check, so the backstop
+    /// would misfire).
+    var preservesWording: Bool = false
 
     static let raw = StylePreset(
         id: "raw",
@@ -27,7 +34,8 @@ struct StylePreset: Identifiable, Hashable {
         Preserve the speaker's wording, tone, and meaning. Do not rephrase or summarise.
         Match the input language (Danish or English) - do not translate.
         Return only the cleaned text. No preamble, no quotes.
-        """
+        """,
+        preservesWording: true
     )
 
     static let email = StylePreset(
